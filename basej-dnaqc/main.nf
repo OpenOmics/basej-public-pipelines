@@ -351,7 +351,7 @@ process BWAMEM2_ALIGN {
 
         BWA_INDEX="${bwamem2_index_dir}/genome.fa"
         # BWA-MEM2 alignment piped to samtools sort
-        bwa-mem2 mem -M -Y -K 2500000000 \\
+        bwa-mem2.avx2 mem -M -Y -K 2500000000 \\
             -R "@RG\\tID:${sample_name}\\tSM:${sample_name}\\tPL:${platform}" \\
             -t ${task.cpus} \$BWA_INDEX ${r1} ${r2} | \\
             samtools sort -@ ${task.cpus} -o ${sample_name}_sorted.bam -

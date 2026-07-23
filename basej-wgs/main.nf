@@ -492,7 +492,7 @@ process BWAMEM2_ALIGN_DEDUP_METRICS {
     # pass first, and fixmate requires name-grouped input. Uncompressed (-u)
     # intermediates skip pointless compress/decompress between samtools steps.
     BWA_INDEX="${bwamem2_index_dir}/genome.fa"
-    bwa-mem2 mem -M -Y -K 2500000000 \\
+    bwa-mem2.avx2 mem -M -Y -K 2500000000 \\
         -R "@RG\\tID:${sample_name}\\tSM:${sample_name}\\tPL:${platform}" \\
         -t ${task.cpus} \$BWA_INDEX '${r1}' '${r2}' | \\
         samtools sort -n -u -@ ${task.cpus} -o ${sample_name}_namesorted.bam -
@@ -1778,7 +1778,7 @@ workflow {
 
         // Coverage subsampling doesn't write read_count files; placeholder
         // so the parquet step's path() input is non-empty.
-        ch_readcount_metrics = channel.of(file('/dev/null')).collect()
+        ch_readcount_metrics = channel.of(file("${projectDir}/assets/dummy_file.txt")).collect()
     } else if (!params.skip_subsampling) {
         ch_split_for_subsample = ch_reads_merged.branch {
             cram: it[it.size()-1] == "CRAM"  // read_type is last element
@@ -1805,10 +1805,10 @@ workflow {
             .mix(SEQKIT_SAMPLE.out.reads.map { sample, reads -> [sample, reads, "FASTQ"] })
         
         // Collect read count files for Ultima/CRAM only
-        // Use /dev/null as fallback if no CRAM files (e.g., Illumina FASTQ-only run)
+        // Use empty dummy file as fallback if no CRAM files (e.g., Illumina FASTQ-only run)
         ch_readcount_metrics = SAMTOOLS_SUBSAMPLE_CRAM.out.read_counts_file
             .collect()
-            .ifEmpty([file('/dev/null')])
+            .ifEmpty([file("${projectDir}/assets/dummy_file.txt")])
     } else {
         // No subsampling: use reads as-is but normalize tuple arity to [sample, reads, read_type]
         // CRAM records come as [sample, cram, crai, "CRAM"], drop crai to match SENTIEON_ALIGN_DEDUP input spec
@@ -1821,9 +1821,9 @@ workflow {
                 items
             }
         }
-        // Use /dev/null as a placeholder to avoid empty channel error in Nextflow path() input
+        // Use empty dummy file as a placeholder to avoid empty channel error in Nextflow path() input
         // Python glob for *_read_counts.txt won't match it, so it's effectively ignored
-        ch_readcount_metrics = channel.of(file('/dev/null')).collect()
+        ch_readcount_metrics = channel.of(file("${projectDir}/assets/dummy_file.txt")).collect()
     }
 
     // Step 2: Branch by read_type
