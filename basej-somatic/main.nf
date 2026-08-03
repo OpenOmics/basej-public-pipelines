@@ -858,9 +858,9 @@ workflow {
         // VEP disabled: pass the full all-variants list straight to the bulk filter,
         // and substitute the usable merged VCF + sentinels for the VEP-derived channels.
         ch_chosen_pre_bulk            = GET_VARIANTS_FROM_MERGED_VCF.out.all_variants
-        ch_vep_filter_provenance      = ch_usable_merged_vcf.map { group, _l -> tuple(group, file('/dev/null')) }
+        ch_vep_filter_provenance      = ch_usable_merged_vcf.map { group, _l -> tuple(group, file("${projectDir}/assets/dummy_file.txt")) }
         ch_merged_vep_vcf_for_samples = ch_usable_vcf_unpacked
-        ch_priority_variants          = ch_usable_merged_vcf.map { group, _l -> tuple(group, file('/dev/null')) }
+        ch_priority_variants          = ch_usable_merged_vcf.map { group, _l -> tuple(group, file("${projectDir}/assets/dummy_file.txt")) }
     }
 
     // -------------------------------------------------------------------------
@@ -869,7 +869,7 @@ workflow {
     if (params.mandatory_variants) {
         ch_mandatory_variants_file = Channel.fromPath(params.mandatory_variants)
     } else {
-        ch_mandatory_variants_file = Channel.of(file('/dev/null'))
+        ch_mandatory_variants_file = Channel.of(file("${projectDir}/assets/dummy_file.txt"))
     }
 
     MERGE_MANDATORY_PRIORITY_VARIANTS(
