@@ -221,24 +221,24 @@ workflow {
     def nr_file = file(resolved_nr, checkIfExists: true)
     def nv_file = file(resolved_nv, checkIfExists: true)
 
-    // ── Optional genotype_bin matrix (Option D) — /dev/null sentinel when absent ──
+    // ── Optional genotype_bin matrix (Option D) — empty file when absent ──
     def resolved_genotype_bin = resolveParam('genotype_bin', params.genotype_bin)
     def genotype_bin_set  = resolved_genotype_bin != null
     def genotype_bin_file = genotype_bin_set
         ? file(resolved_genotype_bin, checkIfExists: true)
-        : file('/dev/null')
+        : file("${projectDir}/assets/dummy_file.txt")
     if ( genotype_bin_set ) {
         log.info "basej-lineage: genotype_bin provided (Option D) — phylogeny will use supplied genotype calls."
     } else {
         log.info "basej-lineage: no genotype_bin — phylogeny will discretize VAF from NR/NV."
     }
 
-    // ── Optional mandatory_variants_qc_status — /dev/null sentinel when absent ──
+    // ── Optional mandatory_variants_qc_status — empty file when absent ──
     def resolved_mandatory_qc = resolveParam('mandatory_variants_qc_status', params.mandatory_variants_qc_status)
     def mandatory_qc_set  = resolved_mandatory_qc != null
     def mandatory_qc_file = mandatory_qc_set
         ? file(resolved_mandatory_qc, checkIfExists: true)
-        : file('/dev/null')
+        : file("${projectDir}/assets/dummy_file.txt")
     if ( mandatory_qc_set ) {
         log.info "basej-lineage: mandatory_variants_qc_status provided — failing mandatory variants removed from heatmaps."
     }
