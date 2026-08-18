@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+
+"""
+basej-run — main entry point for the BaseJumper pipeline suite.
+
+    basej-run --pipeline <dnaqc|wgs|deepvariant|somatic|lineage|wgs2lineage> \
+              --input_csv <csv> OR --lineage_csv (lineage) \
+              --outputDir <dir> [options]
+
+--------------------------------------------------------------------------------
+- Each pipeline is launched via `nextflow run`, which itself submits jobs to
+  Slurm executor on Biowulf HPC. This script orchestrates nextflow invocations
+  and wires outputs between them.
+  -resume is always passed so a failure partway through a step doesn't force
+  reprocessing of already-completed work. Completion markers (chain-only)
+  make the chain itself resumable: rerunning the same command after a
+  failure skips steps already finished and picks back up where it left off.
+  --force reruns a step even if already marked complete.
+--------------------------------------------------------------------------------
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import os
+import shlex
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import NoReturn
+
+# ---------------------------------------------------------------------------
+# Fixed pipeline suite layout
+# ---------------------------------------------------------------------------
+
+def get_basej_home() -> Path:
+    home = os.environ.get("BASEJUMPER_HOME")
+    if not home:
+        sys.stderr.write(
+            "ERROR: BASEJUMPER_HOME is not set -- run 'module load openomics/basejumper' first\n"
+        )
+        sys.exit(1)
+    return Path(home)
+
+# Each pipeline's own workflow-outputs index CSV, published at a fixed location.
+# basej-somatic generates basej-lineage's input samplesheet itself.
+WORKFLOW_ID = "TEST_WORKFLOW_ID"
+INDEX_SUBDIR_TEMPLATE = "workflow_outputs/demo/{workflow_id}/index"
+
+BAM_INDEX_FILENAME = "bam.csv"
+VCF_INDEX_FILENAME = "vcf.csv"
+INDEX_KEY_COL = "biosampleName"
+BAM_VALUE_COL = "bam"
+VCF_VALUE_COL = "vcf"
+LINEAGE_INPUT_SUBDIR = "index"
+LINEAGE_INPUT_FILENAME = "lineage_inputs.csv"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def timestamp() -> str:
+    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+class Logger:
+    """Writes timestamped lines to both stdout and a persistent log file."""
+
+    def __init__(self, log_dir: Path):
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = log_dir / "orchestrator.log"
+
+    def log(self, msg: str) -> None:
+        line = f"[{timestamp()}] {msg}"
+        print(line)
+        with open(self.log_path, "a") as f:
+            f.write(line + "\n")
+
+    def die(self, msg: str) -> NoReturn:
+        self.log(f"FATAL: {msg}")
+        sys.exit(1)
+
+class SamplesheetError(Exception):
+    """Raised when a samplesheet can't be built or validated, with a domain-specific message."""
+
+# ---------------------------------------------------------------------------
+# Samplesheet reading / writing
+# ---------------------------------------------------------------------------
+
+def is_original_sheet(sheet: Path) -> bool:
+    """True if this looks like the original wgs-format sheet (biosampleName,read1,read2,group)"""
+    with open(sheet, newline="") as f:
+        header = next(csv.reader(f))
+    header_lower = {h.strip().lower() for h in header}
+    return "read1" in header_lower and "read2" in header_lower
+
+
+def extract_sample_group(sheet: Path) -> list[tuple[str, str]]:
+    """Pull biosampleName/group pairs out of the original input samplesheet,
+    using csv.DictReader so quoted fields (e.g. a group value containing a
+    comma) are handled correctly -- unlike a naive split on ','.
+
+    Returns a list of (biosampleName, group) tuples."""
+    with open(sheet, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise SamplesheetError(f"{sheet} appears to be empty")
+
+        fieldmap = {name.strip(): name for name in reader.fieldnames}
+        if "biosampleName" not in fieldmap or "group" not in fieldmap:
+            raise SamplesheetError(
+                f"{sheet} is missing a required 'biosampleName' or 'group' column. "
+                f"Found columns: {list(reader.fieldnames)}"
+            )
+
+        rows = []
+        for raw in reader:
+            sample = (raw.get(fieldmap["biosampleName"]) or "").strip()
+            group = (raw.get(fieldmap["group"]) or "").strip()
+            if not sample:
+                continue
+            rows.append((sample, group))
+        return rows
+
+
+def index_dir_for(pipeline_outdir: Path) -> Path:
+    """The fixed location of a pipeline's own workflow-outputs index
+    directory, relative to that pipeline's --outputDir."""
+    return pipeline_outdir / INDEX_SUBDIR_TEMPLATE.format(workflow_id=WORKFLOW_ID)
+
+
+def read_index_csv(index_csv: Path, value_col: str) -> dict[str, str]:
+    """Read a pipeline's own published index CSV (e.g. bam.csv, vcf.csv)
+    into a {biosampleName: path} dict."""
+    if not index_csv.is_file():
+        raise SamplesheetError(
+            f"Expected index file not found at {index_csv}."
+        )
+    with open(index_csv, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or INDEX_KEY_COL not in reader.fieldnames:
+            raise SamplesheetError(
+                f"{index_csv} is missing the expected '{INDEX_KEY_COL}' column. "
+                f"Found columns: {reader.fieldnames}"
+            )
+        if value_col not in reader.fieldnames:
+            raise SamplesheetError(
+                f"{index_csv} is missing the expected '{value_col}' column. "
+                f"Found columns: {reader.fieldnames}"
+            )
+        return {
+            row[INDEX_KEY_COL].strip(): row[value_col].strip()
+            for row in reader
+            if row.get(INDEX_KEY_COL)
+        }
+
+
+def build_p2_samplesheet(orig_sheet: Path, wgs_outdir: Path, out_csv: Path, logger: Logger) -> Path:
+    """biosampleName,bam,group -- joins the original sheet's biosampleName/group
+    with BAM paths read from wgs's own published bam.csv index."""
+    bam_index = index_dir_for(wgs_outdir) / BAM_INDEX_FILENAME
+    logger.log(f"Building deepvariant samplesheet from {orig_sheet} + {bam_index}")
+    rows = extract_sample_group(orig_sheet)
+    bam_by_sample = read_index_csv(bam_index, BAM_VALUE_COL)
+
+    errors: list[str] = []
+    out_rows: list[dict[str, str]] = []
+    for sample, group in rows:
+        bam = bam_by_sample.get(sample)
+        if bam is None:
+            errors.append(f"Sample '{sample}' not found in {bam_index}")
+            continue
+        out_rows.append({"biosampleName": sample, "bam": bam, "group": group})
+
+    if errors:
+        detail = "\n  - ".join(errors)
+        raise SamplesheetError(
+            f"Cannot build deepvariant samplesheet ({len(errors)} sample(s) failed):\n  - {detail}\n"
+        )
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["biosampleName", "bam", "group"])
+        writer.writeheader()
+        writer.writerows(out_rows)
+
+    logger.log(f"Wrote {out_csv} ({len(out_rows)} samples)")
+    return out_csv
+
+
+def build_p3_samplesheet(
+    orig_sheet: Path, wgs_outdir: Path, deepvariant_outdir: Path, out_csv: Path, logger: Logger
+) -> Path:
+    """biosampleName,bam,group,vcf -- joins the original sheet's
+    biosampleName/group with BAM paths from wgs's bam.csv index and VCF
+    paths from deepvariant's vcf.csv index."""
+    bam_index = index_dir_for(wgs_outdir) / BAM_INDEX_FILENAME
+    vcf_index = index_dir_for(deepvariant_outdir) / VCF_INDEX_FILENAME
+    logger.log(f"Building somatic samplesheet from {orig_sheet} + {bam_index} + {vcf_index}")
+    rows = extract_sample_group(orig_sheet)
+    bam_by_sample = read_index_csv(bam_index, BAM_VALUE_COL)
+    vcf_by_sample = read_index_csv(vcf_index, VCF_VALUE_COL)
+
+    errors: list[str] = []
+    out_rows: list[dict[str, str]] = []
+    for sample, group in rows:
+        bam = bam_by_sample.get(sample)
+        vcf = vcf_by_sample.get(sample)
+        if bam is None:
+            errors.append(f"Sample '{sample}' not found in {bam_index}")
+        if vcf is None:
+            errors.append(f"Sample '{sample}' not found in {vcf_index}")
+        if bam is None or vcf is None:
+            continue
+        out_rows.append({"biosampleName": sample, "bam": bam, "group": group, "vcf": vcf})
+
+    if errors:
+        detail = "\n  - ".join(errors)
+        raise SamplesheetError(
+            f"Cannot build somatic samplesheet ({len(errors)} sample(s) failed):\n  - {detail}"
+        )
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["biosampleName", "bam", "group", "vcf"])
+        writer.writeheader()
+        writer.writerows(out_rows)
+
+    logger.log(f"Wrote {out_csv} ({len(out_rows)} samples)")
+    return out_csv
+
+
+def find_p3_output_samplesheet(p3_outdir: Path) -> Path:
+    """Locate the samplesheet that somatic generates natively for lineage,
+    at its known publish location."""
+    expected = p3_outdir / LINEAGE_INPUT_SUBDIR / LINEAGE_INPUT_FILENAME
+    if not expected.is_file():
+        raise SamplesheetError(
+            f"Expected lineage input samplesheet not found at {expected}."
+        )
+    return expected
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Paths:
+    """
+    basej-run's own bookkeeping locations.
+
+    logs/ is created under --outputDir to store orchestrator and nextflow logs.
+
+    samplesheets/ and .basej_markers/ are created with wgs2lineage to store the
+    generated samplesheets and step completion markers, respectively.
+    """
+    basej_home: Path
+    outputDir: Path
+    workdir: Path
+    log_dir: Path = field(init=False)
+
+    def __post_init__(self):
+        self.log_dir = self.outputDir / "logs"
+        self.outputDir.mkdir(parents=True, exist_ok=True)
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def sheet_dir(self) -> Path:
+        """Chain-only: location where basej-run writes intermediate samplesheets it builds."""
+        d = self.outputDir / "samplesheets"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def marker_dir(self) -> Path:
+        """Chain-only: location where step completion markers are written."""
+        d = self.outputDir / ".basej_markers"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
+    def dnaqc_dir(self) -> Path:
+        return self.basej_home / "basej-dnaqc"
+
+    @property
+    def wgs_dir(self) -> Path:
+        return self.basej_home / "basej-wgs"
+
+    @property
+    def deepvariant_dir(self) -> Path:
+        return self.basej_home / "basej-google-deepvariant"
+
+    @property
+    def somatic_dir(self) -> Path:
+        return self.basej_home / "basej-somatic"
+
+    @property
+    def lineage_dir(self) -> Path:
+        return self.basej_home / "basej-lineage"
+
+    def pipeline_dir(self, pipeline: str) -> Path:
+        return {
+            "dnaqc": self.dnaqc_dir,
+            "wgs": self.wgs_dir,
+            "deepvariant": self.deepvariant_dir,
+            "somatic": self.somatic_dir,
+            "lineage": self.lineage_dir,
+        }[pipeline]
+
+    def step_outputDir(self, label: str) -> Path:
+        """Per-step output subfolder under the chain's top-level outputDir."""
+        return self.outputDir / label
+
+    def step_marker(self, label: str) -> Path:
+        """Chain-only completion marker."""
+        return self.marker_dir() / f"{label}.complete"
+
+
+STEP_LABELS = {
+    "wgs": "01_wgs",
+    "deepvariant": "02_deepvariant",
+    "somatic": "03_somatic",
+    "lineage": "04_lineage",
+}
+
+
+class Orchestrator:
+    def __init__(self, args: argparse.Namespace, paths: Paths, logger: Logger, passthrough: list[str] | None = None):
+        self.args = args
+        self.paths = paths
+        self.logger = logger
+        self.passthrough = passthrough or []
+
+    # -- extra-args assembly -------------------------------------------------
+    def extra_args_for(self, pipeline: str) -> str:
+        """Returns the extra param override args for a given pipeline."""
+        if self.args.pipeline == "wgs2lineage":
+            return {
+                "wgs": self.args.wgs_extra,
+                "deepvariant": self.args.deepvariant_extra,
+                "somatic": self.args.somatic_extra,
+                "lineage": self.args.lineage_extra
+            }[pipeline]
+        return " ".join(self.passthrough)
+
+    # -- input resolution -----------------------------------------------------
+    def resolve_input_for(self, pipeline: str) -> Path | None:
+        """
+        Resolve the input CSV for a given pipeline. Returns None under --dry-run.
+        """
+        if self.args.dry_run:
+            return None
+
+        if pipeline == "lineage":
+            return self.args.lineage_csv
+
+        return self.args.input_csv
+
+    # -- nextflow launch --------------------------------------------------
+
+    def step_already_done(self, label: str) -> bool:
+        return self.paths.step_marker(label).is_file() and not self.args.force
+
+    def run_nf(
+        self, pipeline_dir: Path, label: str, extra: str, input_csv: Path | None,
+        outputDir: Path, use_marker: bool = True,
+    ) -> bool:
+        """
+        Launch one pipeline via nextflow run. Returns True on success.
+
+        Every BaseJumper pipeline except lineage takes its input via
+        --input_csv; lineage takes --lineage_csv.
+
+        outputDir is passed through to `nextflow run` exactly as given by
+        the caller: for a standalone run, this is the user's provided --outputDir; 
+        for a chain run, each pipeline will have an output subdirectory under the user's
+        provided --outputDir.
+
+        use_marker controls whether completion-marker resumability applies (only applicable to chains).
+
+        In --dry-run mode, input_csv is None.
+        """
+        if use_marker and self.step_already_done(label):
+            self.logger.log(f"STEP [{label}] already complete, skipping (use --force to rerun)")
+            return True
+
+        nf_log = self.paths.log_dir / f"{label}.nextflow.log"
+        stdout_log = self.paths.log_dir / f"{label}.stdout.log"
+
+        input_flag = "--lineage_csv" if label == STEP_LABELS["lineage"] else "--input_csv"
+
+        if self.args.dry_run:
+            cmd_preview = [
+                "nextflow", "run", str(pipeline_dir / "main.nf"),
+                input_flag, "<resolved at run time>",
+                "--outputDir", str(outputDir),
+                "-log", str(nf_log),
+                "-work-dir", str(self.paths.workdir),
+                "-resume"
+            ]
+            if extra.strip():
+                cmd_preview.extend(shlex.split(extra))
+            self.logger.log(f"STEP [{label}] dry-run, would launch: {' '.join(cmd_preview)}")
+            return True
+
+        outputDir.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "nextflow", "run", str(pipeline_dir / "main.nf"),
+            input_flag, str(input_csv),
+            "--outputDir", str(outputDir),
+            "-log", str(nf_log),
+            "-work-dir", str(self.paths.workdir),
+            "-resume",
+        ]
+        if extra.strip():
+            cmd.extend(shlex.split(extra))
+
+        self.logger.log(f"STEP [{label}] launching: {' '.join(cmd)}")
+
+        with open(stdout_log, "a") as out:
+            result = subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT)
+
+        if result.returncode != 0:
+            self.logger.log(
+                f"STEP [{label}] FAILED (exit {result.returncode}) -- see logs"
+            )
+            return False
+
+        if use_marker:
+            self.paths.step_marker(label).touch()
+        self.logger.log(f"STEP [{label}] completed successfully")
+        return True
+
+    # -- dispatch -----------------------------------------------------------
+
+    def run_single(self, pipeline: str) -> int:
+        """Standalone pipeline run"""
+        pipeline_dir = self.paths.pipeline_dir(pipeline)
+        label = STEP_LABELS[pipeline] if pipeline in STEP_LABELS else pipeline
+
+        try:
+            input_csv = self.resolve_input_for(pipeline)
+        except SamplesheetError as e:
+            self.logger.die(str(e))
+
+        ok = self.run_nf(
+            pipeline_dir, label, self.extra_args_for(pipeline), input_csv,
+            self.args.outputDir, use_marker=False,
+        )
+        return 0 if ok else 1
+
+    def run_chain(self) -> int:
+        """Runs wgs -> deepvariant -> somatic -> lineage in sequence.
+
+        The user only ever provides the original wgs-format sheet
+        (biosampleName,read1,read2,group) via --input_csv, and basej-run
+        generates deepvariant's and somatic's samplesheets by joining that
+        original sheet with each prior step's own published index CSV.
+        Lineage's input is somatic's own self-generated output samplesheet,
+        located directly rather than built.
+        """
+        if not self.args.dry_run and not is_original_sheet(self.args.input_csv):
+            self.logger.die(
+                "wgs2lineage requires the ORIGINAL wgs-format samplesheet "
+                "(biosampleName,read1,read2,group) via --input_csv"
+            )
+
+        self.logger.log("CHAIN starting: wgs -> deepvariant -> somatic -> lineage")
+
+        wgs_outdir = self.paths.step_outputDir(STEP_LABELS["wgs"])
+        deepvariant_outdir = self.paths.step_outputDir(STEP_LABELS["deepvariant"])
+        somatic_outdir = self.paths.step_outputDir(STEP_LABELS["somatic"])
+        lineage_outdir = self.paths.step_outputDir(STEP_LABELS["lineage"])
+
+        # -- step 1: wgs -- takes the original input samplesheet
+        if not self.run_nf(
+            self.paths.pipeline_dir("wgs"), STEP_LABELS["wgs"],
+            self.extra_args_for("wgs"),
+            None if self.args.dry_run else self.args.input_csv,
+            wgs_outdir,
+        ):
+            return 1
+
+        # -- step 2: deepvariant -- basej-run builds biosampleName,bam,group
+        # by joining the original sheet with wgs's own published bam.csv
+        try:
+            deepvariant_input = None if self.args.dry_run else build_p2_samplesheet(
+                self.args.input_csv,
+                wgs_outdir,
+                self.paths.sheet_dir / "02_deepvariant.samplesheet.csv",
+                self.logger,
+            )
+        except SamplesheetError as e:
+            self.logger.die(str(e))
+        if not self.run_nf(
+            self.paths.pipeline_dir("deepvariant"), STEP_LABELS["deepvariant"],
+            self.extra_args_for("deepvariant"), deepvariant_input, deepvariant_outdir,
+        ):
+            return 1
+
+        # -- step 3: somatic -- basej-run builds biosampleName,bam,group,vcf
+        # by joining the original sheet with wgs's bam.csv and deepvariant's vcf.csv
+        try:
+            somatic_input = None if self.args.dry_run else build_p3_samplesheet(
+                self.args.input_csv,
+                wgs_outdir,
+                deepvariant_outdir,
+                self.paths.sheet_dir / "03_somatic.samplesheet.csv",
+                self.logger,
+            )
+        except SamplesheetError as e:
+            self.logger.die(str(e))
+        if not self.run_nf(
+            self.paths.pipeline_dir("somatic"), STEP_LABELS["somatic"],
+            self.extra_args_for("somatic"), somatic_input, somatic_outdir,
+        ):
+            return 1
+
+        # -- step 4: lineage -- somatic already generated lineage's input
+        # samplesheet itself; basej-run just locates it, no building involved
+        try:
+            lineage_input = None if self.args.dry_run else find_p3_output_samplesheet(somatic_outdir)
+        except SamplesheetError as e:
+            self.logger.die(str(e))
+        if not self.run_nf(
+            self.paths.pipeline_dir("lineage"), STEP_LABELS["lineage"],
+            self.extra_args_for("lineage"), lineage_input, lineage_outdir,
+        ):
+            return 1
+
+        self.logger.log(f"CHAIN completed successfully. Results under: {self.paths.outputDir}")
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI Parser
+# ---------------------------------------------------------------------------
+
+EPILOG = """\
+EXAMPLES
+  # Run a standalone pipeline (dnaqc, wgs, deepvariant, somatic)
+  basej-run --pipeline dnaqc --input_csv dnaqc_input.csv --outputDir results [options]
+
+  # Run the lineage pipeline using somatic's output samplesheet
+  basej-run --pipeline lineage --lineage_csv results/somatic/index/lineage_inputs.csv --outputDir results [options]
+
+  # Run the full chain wgs2lineage (wgs -> deepvariant -> somatic -> lineage)
+  basej-run --pipeline wgs2lineage --input_csv wgs_input.csv --outputDir results
+
+  # Run the full chain wgs2lineage with a pipeline-specific parameter overridden
+  basej-run --pipeline wgs2lineage --input_csv wgs_input.csv --outputDir results \
+    --wgs_extra "--mode exome" --somatic_extra "--gender female"
+"""
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="basej-run",
+        description="Run any individual or the wgs2lineage BaseJumper pipeline",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--pipeline", required=True,
+        choices=["dnaqc", "wgs", "deepvariant", "somatic", "lineage", "wgs2lineage"],
+        help=("Select which pipeline to run. 'wgs2lineage' is a convenience alias for the full chain: wgs -> deepvariant -> somatic -> lineage"),
+    )
+    parser.add_argument(
+        "--input_csv", type=Path, default=None,
+        help=(
+            "Input CSV. Required for --pipeline dnaqc / wgs / deepvariant / "
+            "somatic / wgs2lineage. For --pipeline wgs2lineage, this must be the wgs input "
+            "samplesheet (biosampleName,read1,read2,group); basej-run "
+            "auto-builds deepvariant's and somatic's samplesheets using "
+            "pipeline-provided index files."
+        ),
+    )
+    parser.add_argument(
+        "--lineage_csv", type=Path, default=None,
+        help=(
+            "Input CSV for --pipeline lineage specifically. Output from basej-somatic"
+        ),
+    )
+    parser.add_argument(
+        "--outputDir", type=Path, default=Path.cwd() / "basej-results",
+        help="Base output directory (default: ./basej-results)."
+    )
+    parser.add_argument(
+        "--workdir", type=Path, default=Path.cwd() / "work",
+        help="Nextflow work directory (default: ./work)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print the nextflow run commands")
+    parser.add_argument("--force", action="store_true", help="Rerun a step even if already marked complete")
+
+    param_group = parser.add_argument_group("Optional parameter overrides for --pipeline wgs2lineage")
+    param_group.add_argument("--wgs_extra", default="", help="Additional basej-wgs parameter flags, quoted as one string")
+    param_group.add_argument("--deepvariant_extra", default="", help="Additional basej-deepvariant parameter flags, quoted as one string")
+    param_group.add_argument("--somatic_extra", default="", help="Additional basej-somatic parameter flags, quoted as one string")
+    param_group.add_argument("--lineage_extra", default="", help="Additional basej-lineage parameter flags, quoted as one string")
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args, passthrough = parser.parse_known_args()
+
+    if args.pipeline == "wgs2lineage" and passthrough:
+        sys.stderr.write(
+            f"ERROR: unrecognized argument(s) for --pipeline wgs2lineage: {' '.join(passthrough)}\n"
+            f"       Pipeline-specific overrides are specified with --wgs_extra/--deepvariant_extra/--somatic_extra/--lineage_extra\n"
+        )
+        return 1
+
+    if args.pipeline == "lineage":
+        if args.lineage_csv is None:
+            sys.stderr.write("ERROR: --lineage_csv is required for --pipeline lineage\n")
+            return 1
+        if not args.lineage_csv.is_file():
+            sys.stderr.write(f"ERROR: file not found: {args.lineage_csv}\n")
+            return 1
+    else:
+        if args.input_csv is None:
+            sys.stderr.write(f"ERROR: --input_csv is required for --pipeline {args.pipeline}\n")
+            return 1
+        if not args.input_csv.is_file():
+            sys.stderr.write(f"ERROR: file not found: {args.input_csv}\n")
+            return 1
+
+    basej_home = get_basej_home()
+    paths = Paths(basej_home=basej_home, outputDir=args.outputDir, workdir=args.workdir)
+    logger = Logger(paths.log_dir)
+
+    orch = Orchestrator(args, paths, logger, passthrough)
+
+    try:
+        if args.pipeline == "wgs2lineage":
+            return orch.run_chain()
+        return orch.run_single(args.pipeline)
+    except SamplesheetError as e:
+        logger.die(str(e))
+    except KeyboardInterrupt:
+        logger.log("Interrupted by user")
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
