@@ -10,8 +10,8 @@ nextflow_pipeline {
                 outputDir    = "${outputDir}"
                 workspace    = "demo"
                 workflow_id  = "test_lineage_GRCh38"
-                max_memory   = "24.GB"
-                max_cpus     = "8"
+                max_memory   = "12.GB"
+                max_cpus     = "4"
                 genome       = "GRCh38"
 
                 // Use vcf_dir to provide per-sample somatic annotated VCFs

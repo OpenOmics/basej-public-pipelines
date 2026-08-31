@@ -854,6 +854,9 @@ workflow {
                 tuple(group, vcf, tbi)
             }
         ch_priority_variants          = CONCAT_VEP_PERCHR_OUTPUTS.out.priority_variants
+        // VEP per-chromosome summary HTMLs (for MultiQC) + merged VEP VCF (for publish)
+        ch_vep_html_for_multiqc       = VEP_ANNOTATE.out.vep_stats.map { group, chr, html -> html }
+        ch_vep_vcf_for_publish        = MERGE_VEP_VCF_BY_GROUP.out.vep_vcf
     } else {
         // VEP disabled: pass the full all-variants list straight to the bulk filter,
         // and substitute the usable merged VCF + sentinels for the VEP-derived channels.
@@ -861,6 +864,9 @@ workflow {
         ch_vep_filter_provenance      = ch_usable_merged_vcf.map { group, _l -> tuple(group, file("${projectDir}/assets/dummy_file.txt")) }
         ch_merged_vep_vcf_for_samples = ch_usable_vcf_unpacked
         ch_priority_variants          = ch_usable_merged_vcf.map { group, _l -> tuple(group, file("${projectDir}/assets/dummy_file.txt")) }
+        // No VEP: empty channels so MultiQC and the vep_annotated publish are skipped.
+        ch_vep_html_for_multiqc       = Channel.empty()
+        ch_vep_vcf_for_publish        = Channel.empty()
     }
 
     // -------------------------------------------------------------------------
@@ -1450,9 +1456,7 @@ workflow {
         ch_annotated_for_stats
     )
 
-    // VEP per-chromosome summary HTMLs
-    ch_vep_html_for_multiqc = VEP_ANNOTATE.out.vep_stats
-        .map { group, chr, html -> html }
+    // VEP per-chromosome summary HTMLs (ch_vep_html_for_multiqc defined in the VEP if/else above)
 
     ch_all_df_gt = PREPROCESS_VCF.out.df_gt
         .map { sample_name, df_gt, group -> df_gt }
@@ -1520,7 +1524,7 @@ workflow {
     combined_report_pdf = VARIANT_FILTER_FUNNEL.out.filter_plot
         .map { group, pdf -> [groupId: group, pdf: pdf.toString()] }
     
-    vep_annotated = MERGE_VEP_VCF_BY_GROUP.out.vep_vcf
+    vep_annotated = ch_vep_vcf_for_publish
     
     germline_annotated_vcf = IDENTIFY_GERMLINE_FROM_STATS.out.annotated_vcf
     

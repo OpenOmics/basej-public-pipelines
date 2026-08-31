@@ -245,5 +245,4 @@ If you need any help, please [submit a helpdesk ticket](https://bioskryb.atlassi
 
 NOTE: Several studies have utilized BaseJumper pipelines as part of standard
 quality control processes implemented through ResolveServices<sup>SM</sup>. While
-these pipelines may not be explicitly cited, they are integral to the
-methodologies described.
+these pipelines may not be explicitly cited, they are integral to the methodologies described.

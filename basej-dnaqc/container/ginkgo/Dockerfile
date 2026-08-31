@@ -11,6 +11,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 COPY ./binUnsorted /usr/local/bin
 COPY ./CNVcaller /usr/local/bin
 
+# The COPYed binaries inherit the source files' permissions, which lack the
+# execute bit (-rw-rw-r--). binUnsorted and CNVcaller are invoked directly by
+# the Ginkgo processes, so without +x they fail with exit 126 ("Permission
+# denied"), silently emptying the Ginkgo output channels. Make them executable.
+RUN chmod +x /usr/local/bin/binUnsorted /usr/local/bin/CNVcaller
+
 
 RUN apt-get update -qq -y \
     && apt-get install -y --no-install-recommends software-properties-common dirmngr gnupg

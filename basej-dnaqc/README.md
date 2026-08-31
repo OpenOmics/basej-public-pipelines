@@ -238,6 +238,37 @@ per-biosample QC Parquet files, merged metric tables, CNV summaries, QC plots,
 consensus scores, and a MultiQC report.
 
 
+# Docker User / File Permissions
+
+The custom images run as a non-root user (`appuser`). On hosts where your user ID
+differs from the image's, containerized tasks can fail to write to the Nextflow work
+directory with `touch: cannot touch '.command.trace': Permission denied` (typically
+on the Ginkgo and preseq steps). If you hit this, tell Nextflow to run the task
+containers as your own user:
+
+1. Create a file named `local.config` next to `main.nf` with this content:
+
+   ```groovy
+   docker {
+       runOptions = '-u $(id -u):$(id -g)'
+   }
+   ```
+
+2. Add `-c local.config` to your `nextflow run` command, for example:
+
+   ```
+   nextflow run main.nf \
+     -c local.config \
+     --input_csv $PWD/tests/data/inputs/input_qcTest3.csv \
+     --genomes_base /path/to/local/genomes \
+     --architecture x86 --genome GRCh38 \
+     --outputDir test --max_cpus 8 --max_memory 30.GB
+   ```
+
+`$(id -u)`/`$(id -g)` are filled in by your shell at runtime, so the containers run
+as you and can write to the work directory.
+
+
 # Testing
 
 ## Test Data Access
@@ -290,6 +321,8 @@ nf-test test
 nf-test test tests/main.nf.test --tag GRCh38
 ```
 
+> The `GRCh38` opensource test is the one exercised automatically by the release CI.
+
 
 # Need Help?
 
@@ -306,6 +339,5 @@ If you need any help, please [submit a helpdesk ticket](https://bioskryb.atlassi
   [https://www.biorxiv.org/content/10.1101/2024.04.26.587806v1.full](https://www.biorxiv.org/content/10.1101/2024.04.26.587806v1.full)
 
 NOTE: Several studies have utilized BaseJumper pipelines as part of standard
-quality control processes implemented through ResolveServices<sup>SM</sup>. While
-these pipelines may not be explicitly cited, they are integral to the
+quality control processes implemented through ResolveServices<sup>SM</sup>. While these pipelines may not be explicitly cited, they are integral to the
 methodologies described.

@@ -1,0 +1,138 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema",
+    "$id": "https://github.com/BioSkryb/nf-bioskryb-utils/pipelines/basej-rnaqc/nextflow_schema.json",
+    "title": "basej-rnaqc pipeline parameters",
+    "description": "Single-cell RNA QC pipeline with STAR alignment, HTSeq quantification, metrics collection, and cluster QC.",
+    "type": "object",
+    "definitions": {
+        "input_output_options": {
+            "title": "Input/output options",
+            "type": "object",
+            "fa_icon": "fas fa-terminal",
+            "description": "Define where the pipeline should find input data and save output data.",
+            "required": ["input_csv", "outputDir", "workspace", "dataset_id"],
+            "properties": {
+                "input_csv": {
+                    "type": "string",
+                    "format": "file-path",
+                    "mimetype": "text/csv",
+                    "pattern": "^\\S+\\.csv$",
+                    "description": "Path to comma-separated file containing information about the samples in the experiment.",
+                    "help_text": "You will need to create a design file with information about the samples in your experiment before running the pipeline. Use this parameter to specify its location. It must be a comma-separated file with at least 3 columns: biosampleName, read1, read2, and a header row.",
+                    "fa_icon": "fas fa-file-csv"
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace identifier for S3 output layout and tagging.",
+                    "help_text": "Used in S3 output prefixes and applied as an S3 object tag. Required for standardized output organization.",
+                    "fa_icon": "fas fa-layer-group"
+                },
+                "dataset_id": {
+                    "type": "string",
+                    "description": "Dataset identifier for S3 tagging and organization.",
+                    "help_text": "Applied as an S3 object tag to associate outputs with a specific dataset.",
+                    "fa_icon": "fas fa-database"
+                },
+                "resume_workflow_id": {
+                    "type": "string",
+                    "description": "Original workflow_id to reuse when resuming a run, keeping output paths stable and idempotent.",
+                    "help_text": "Set this to the workflow_id of a previous run when resuming so outputs are written to the same S3 location and duplication is avoided. When unset, workflow_id is derived from TOWER_WORKFLOW_ID.",
+                    "fa_icon": "fas fa-redo",
+                    "hidden": true
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "description": "Workflow run identifier. Auto-populated from TOWER_WORKFLOW_ID or Nextflow session ID.",
+                    "help_text": "Unique identifier for this workflow run. Used in S3 output paths and tags. Defaults to TOWER_WORKFLOW_ID environment variable if running on Seqera Platform, otherwise uses the Nextflow session ID.",
+                    "fa_icon": "fas fa-fingerprint",
+                    "hidden": true
+                },
+                "outputDir": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "pattern": "^s3://",
+                    "description": "S3 path where the results will be saved.",
+                    "help_text": "The S3 output directory for pipeline results (e.g., 's3://your-output-bucket/analysis/project_name/pipeline-basej-rnaqc').",
+                    "fa_icon": "fas fa-folder-open"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "description": "Timestamp suffix for execution reports.",
+                    "help_text": "Optional timestamp for naming execution reports. Format: 'yyMMdd_HHmmss'.",
+                    "fa_icon": "fas fa-clock",
+                    "hidden": true
+                }
+            }
+        },
+        "reference_genome_options": {
+            "title": "Reference genome options",
+            "type": "object",
+            "fa_icon": "fas fa-dna",
+            "description": "Define the reference genome and associated files for STAR alignment and gene quantification.",
+            "required": ["genome"],
+            "properties": {
+                "genome": {
+                    "type": "string",
+                    "description": "Name of the reference genome to use for alignment.",
+                    "help_text": "Name of the reference genome. This will automatically configure the STAR index, GTF, and tx2gene files. Supported genomes: GRCh38, GRCm39.",
+                    "fa_icon": "fas fa-dna",
+                    "enum": ["GRCh38", "GRCm39"],
+                    "default": "GRCh38"
+                },
+                "star_index": {
+                    "type": "string",
+                    "format": "directory-path",
+                    "description": "Path to STAR genome index directory. Overrides genome-based configuration.",
+                    "help_text": "Directory containing STAR genome index files. Auto-populated from genomes.config based on the selected genome.",
+                    "fa_icon": "fas fa-folder",
+                    "hidden": true
+                },
+                "gtf": {
+                    "type": "string",
+                    "format": "file-path",
+                    "description": "Path to GTF gene annotation file.",
+                    "help_text": "GTF file used by STAR alignment, HTSeq counting, and Qualimap RNA-seq QC. Auto-populated from genomes.config.",
+                    "fa_icon": "fas fa-file-alt",
+                    "hidden": true
+                },
+                "tx2gene": {
+                    "type": "string",
+                    "format": "file-path",
+                    "description": "Path to transcript-to-gene mapping file.",
+                    "help_text": "Transcript-to-gene mapping file used by HTSeq summary processing. Auto-populated from genomes.config.",
+                    "fa_icon": "fas fa-file-alt",
+                    "hidden": true
+                }
+            }
+        },
+        "read_processing_options": {
+            "title": "Read processing options",
+            "type": "object",
+            "fa_icon": "fas fa-stream",
+            "description": "Options for read subsampling and quality control.",
+            "properties": {
+                "n_reads": {
+                    "type": "integer",
+                    "description": "Number of reads to subsample for QC analysis.",
+                    "help_text": "Number of reads to analyze (default: 2,000,000). Use 0 to analyze all reads. Subsampling to 2M reads enables faster QC while maintaining statistical power.",
+                    "fa_icon": "fas fa-random",
+                    "default": 2000000,
+                    "minimum": 0
+                },
+                "seqtk_sample_seed": {
+                    "type": "integer",
+                    "description": "Seed for reproducible subsampling.",
+                    "help_text": "Seed value for seqtk subsampling. Use the same seed to reproduce identical subsamples.",
+                    "fa_icon": "fas fa-key",
+                    "default": 12345,
+                    "hidden": true
+                }
+            }
+        }
+    },
+    "allOf": [
+        { "$ref": "#/definitions/input_output_options" },
+        { "$ref": "#/definitions/reference_genome_options" },
+        { "$ref": "#/definitions/read_processing_options" }
+    ]
+}

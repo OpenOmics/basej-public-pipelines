@@ -1,0 +1,113 @@
+nextflow_pipeline {
+
+    name "Test Workflow main.nf"
+    script "main.nf"
+
+    test("rnaqc_GRCh38_test") {
+        tag "GRCh38"
+        when {
+            params {
+                outputDir    = "${outputDir}"
+                workspace    = "demo"
+                workflow_id  = "test_rnaqc_GRCh38"
+                // rnaqc uses the FULL RNA reference (transcriptome-wide reads need the
+                // full STAR index; chr22-only makes gene detection too sparse for the
+                // PCA/heatmap steps). This test is for MANUAL runs, not the CI suite.
+                input_csv    = "$baseDir/tests/data/inputs/nftest_input.csv"
+                max_memory   = "64.GB"
+                max_cpus     = "8"
+                architecture = "x86"
+                genome       = "GRCh38"
+                n_reads      = 500000
+            }
+        }
+
+        then {
+            assertAll(
+
+                { assert workflow.success },
+
+                { assert path("${outputDir}/workflow_outputs/demo/test_rnaqc_GRCh38/reports/multiqc_report.html").exists() },
+
+                // Check rnaqc_all_metrics.tsv exists and has correct structure
+                {
+                    def f = path("${outputDir}/workflow_outputs/demo/test_rnaqc_GRCh38/metrics/rnaqc_metrics/rnaqc_all_metrics.tsv")
+                    assert f.exists()
+                    def lines = f.readLines()
+                    def header = lines[0].split('\t').toList()
+
+                    // Required columns must be present
+                    ['qc_score', 'qc_status', 'total_reads', 'final_reads', 'subsampled',
+                     'star_uniquely_mapped_pct', 'genes_detected_total', 'mt_pct',
+                     'prop_exonic', 'prop_intronic', 'prop_intergenic'].each { col ->
+                        assert header.contains(col) : "Missing column: ${col}"
+                    }
+
+                    def idx = { col -> header.indexOf(col) }
+                    def dbl = { v -> (v && v != 'None' && !v.isEmpty()) ? v.toDouble() : null }
+                    def lng = { v -> (v && v != 'None' && !v.isEmpty()) ? v.toLong()   : null }
+
+                    // Expected values per sample (pre-subsampled data, ~100-200K reads per sample)
+                    def expected = [
+                        'ResolveOMEv2.1-RNA-04C': [total_reads: 716600,  qc_status: 'PASS', qc_score: 5],
+                        'ResolveOMEv2.1-RNA-04E': [total_reads: 894242,  qc_status: 'PASS', qc_score: 5],
+                        'ResolveOMEv2.1-RNA-06B': [total_reads: 584196,  qc_status: 'PASS', qc_score: 4],
+                        'ResolveOMEv2.1-RNA-07H': [total_reads: 429114,  qc_status: 'PASS', qc_score: 5],
+                        'ResolveOMEv2.1-RNA-08B': [total_reads: 779982,  qc_status: 'PASS', qc_score: 5],
+                    ]
+
+                    assert lines.size() - 1 == expected.size() : "Expected ${expected.size()} samples, got ${lines.size() - 1}"
+
+                    for (int i = 1; i < lines.size(); i++) {
+                        def cols   = lines[i].split('\t', -1)
+                        def sample = cols[0]
+                        def exp    = expected[sample]
+                        assert exp != null : "Unexpected sample in rnaqc_all_metrics.tsv: ${sample}"
+
+                        assert cols[idx('total_reads')].trim().toLong()  == exp.total_reads : "total_reads mismatch for ${sample}"
+                        assert cols[idx('qc_status')].trim()             == exp.qc_status   : "qc_status mismatch for ${sample}"
+                        assert cols[idx('qc_score')].trim().toDouble().intValue() == exp.qc_score : "qc_score mismatch for ${sample}"
+
+                        // subsampled: True for samples with total_reads > n_reads (500000)
+                        def totalReads = cols[idx('total_reads')].trim().toLong()
+                        def expectedSubsampled = totalReads > 500000 ? 'True' : 'False'
+                        assert cols[idx('subsampled')].trim() == expectedSubsampled : "subsampled mismatch for ${sample}: expected ${expectedSubsampled}"
+
+                        // STAR uniquely mapped: >50% for RNA
+                        def starPct = dbl(cols[idx('star_uniquely_mapped_pct')].trim())
+                        if (starPct != null) assert starPct >= 50.0 && starPct <= 95.0 : "star_uniquely_mapped_pct out of range for ${sample}: ${starPct}"
+
+                        // Genes detected: >3000 for these samples
+                        def genes = lng(cols[idx('genes_detected_total')].trim())
+                        if (genes != null) assert genes >= 3000 && genes <= 10000 : "genes_detected_total out of range for ${sample}: ${genes}"
+
+                        // mt_pct: <15% for healthy single-cell RNA
+                        def mtPct = dbl(cols[idx('mt_pct')].trim())
+                        if (mtPct != null) assert mtPct >= 0.0 && mtPct <= 0.15 : "mt_pct out of range for ${sample}: ${mtPct}"
+
+                        // prop_exonic: >0.5 for RNA (majority of reads map to exons)
+                        def propExonic = dbl(cols[idx('prop_exonic')].trim())
+                        if (propExonic != null) assert propExonic >= 0.5 && propExonic <= 1.0 : "prop_exonic out of range for ${sample}: ${propExonic}"
+                    }
+                },
+
+                // Verify rnaqc_summary parquet files exist for all samples
+                {
+                    def tableBase = "${outputDir}/tables/rnaqc_summary/workspace=demo/workflow_id=test_rnaqc_GRCh38"
+                    assert path("${tableBase}/biosample=ResolveOMEv2.1-RNA-04C/output.parquet").exists()
+                    assert path("${tableBase}/biosample=ResolveOMEv2.1-RNA-04E/output.parquet").exists()
+                    assert path("${tableBase}/biosample=ResolveOMEv2.1-RNA-06B/output.parquet").exists()
+                    assert path("${tableBase}/biosample=ResolveOMEv2.1-RNA-07H/output.parquet").exists()
+                    assert path("${tableBase}/biosample=ResolveOMEv2.1-RNA-08B/output.parquet").exists()
+                },
+
+                // Gene count summary parquet
+                { assert path("${outputDir}/tables/gene_count_summary/workspace=demo/workflow_id=test_rnaqc_GRCh38/output.parquet").exists() },
+
+                // QC composition plot
+                { assert path("${outputDir}/workflow_outputs/demo/test_rnaqc_GRCh38/qc_plots/RNAQC_composition_mqc.jpg").exists() }
+            )
+        }
+    }
+
+}

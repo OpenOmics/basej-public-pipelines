@@ -52,7 +52,7 @@ process SEQKIT_SAMPLE {
 
     output:
     tuple val(sample_name), path("${sample_name}_subsampled_R*.fastq.gz"), emit: reads
-    tuple val(sample_name), env(TOTAL_READS), env(FINAL_READS), emit: read_counts
+    tuple val(sample_name), env('TOTAL_READS'), env('FINAL_READS'), emit: read_counts
     path("${sample_name}_read_counts.txt"), emit: read_counts_file
 
     script:
@@ -124,7 +124,7 @@ process SAMTOOLS_SUBSAMPLE_CRAM {
 
     output:
     tuple val(sample_name), path("${sample_name}.cram"), path("${sample_name}.cram.crai"), emit: cram
-    tuple val(sample_name), env(TOTAL_READS), env(FINAL_READS), emit: read_counts
+    tuple val(sample_name), env('TOTAL_READS'), env('FINAL_READS'), emit: read_counts
     path("${sample_name}_read_counts.txt"), emit: read_counts_file
 
     script:

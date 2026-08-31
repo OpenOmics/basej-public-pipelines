@@ -1,0 +1,5 @@
+input_csv: "/path/to/input.csv"
+genome: "GRCh38"
+workspace: "demo"
+dataset_id: "test_dataset"
+outputDir: "results"

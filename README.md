@@ -9,7 +9,9 @@ own run instructions.
 | Pipeline | Directory | Description |
 |---|---|---|
 | basej-dnaqc | [`basej-dnaqc/`](basej-dnaqc/) | Single-cell DNA low-pass QC — subsample, align, dedup, CNV, per-biosample QC metrics and consensus scoring |
+| basej-rnaqc | [`basej-rnaqc/`](basej-rnaqc/) | Single-cell RNA library QC — STAR 2-pass alignment, HTSeq gene quantification, Qualimap genomic composition, and composite QC scoring |
 | basej-wgs | [`basej-wgs/`](basej-wgs/) | Single-cell WGS/WES QC — align, dedup, and collect whole-genome or hybrid-selection coverage metrics |
+| basej-google-deepvariant | [`basej-google-deepvariant/`](basej-google-deepvariant/) | Germline SNV/indel calling from BAM/CRAM with Google DeepVariant using a BioSkryb custom-trained model that corrects PTA artifacts |
 | basej-somatic | [`basej-somatic/`](basej-somatic/) | Single-cell somatic SNP/indel detection and heuristic-QC filtering with per-group variant tables |
 | basej-lineage | [`basej-lineage/`](basej-lineage/) | Single-cell lineage/phylogeny reconstruction and COSMIC mutational-signature analysis from variant matrices |
 
@@ -31,7 +33,7 @@ basej-public-pipelines/
 Pick the pipeline you need from the table above and follow the `README.md` inside
 its directory for setup, inputs, run commands, options, and outputs.
 
-To obtain the reference-genome bundles and container images needed to run these
+To obtain the reference-genome bundles and pipeline resources needed to run these
 pipelines, email [basejumper@bioskryb.com](mailto:basejumper@bioskryb.com).
 
 ## Running on Biowulf

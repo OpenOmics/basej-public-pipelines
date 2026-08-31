@@ -1,0 +1,7 @@
+biosampleName,read1,read2,groups
+ResolveOMEv2.1-RNA-04C,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-04C_S1_L001_R1_001.fastq.gz,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-04C_S1_L001_R2_001.fastq.gz,group1
+ResolveOMEv2.1-RNA-04E,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-04E_S1_L001_R1_001.fastq.gz,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-04E_S1_L001_R2_001.fastq.gz,group1
+ResolveOMEv2.1-RNA-06B,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-06B_S1_L001_R1_001.fastq.gz,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-06B_S1_L001_R2_001.fastq.gz,group1
+ResolveOMEv2.1-RNA-07H,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-07H_S1_L001_R1_001.fastq.gz,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-07H_S1_L001_R2_001.fastq.gz,group2
+ResolveOMEv2.1-RNA-08B,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-08B_S1_L001_R1_001.fastq.gz,s3://bioskryb-public-data/DemoData/ResolveOME/ROMEv2/RNA/ResolveOMEv2.1-RNA-08B_S1_L001_R2_001.fastq.gz,group2
+DNAQC-test1-0reads,s3://bioskryb-public-data/pipeline_resources/dev-resources/local_test_files/test1-0reads_S1_L001_R1_001.fastq.gz,s3://bioskryb-public-data/pipeline_resources/dev-resources/local_test_files/test1-0reads_S1_L001_R2_001.fastq.gz

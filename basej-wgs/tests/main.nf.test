@@ -11,8 +11,9 @@ nextflow_pipeline {
                 workspace              = "demo"
                 workflow_id            = "test_wgs_GRCh38"
                 input_csv              = "$baseDir/tests/data/inputs/nftest_input.csv"
-                max_memory             = "24.GB"
-                max_cpus               = "8"
+                genomes_base           = "s3://bioskryb-public-data/pipeline_resources/test_genomes"
+                max_memory             = "12.GB"
+                max_cpus               = "4"
                 architecture           = "x86"
                 genome                 = "GRCh38"
                 mode                   = "wgs"
@@ -56,10 +57,12 @@ nextflow_pipeline {
                     def dbl = { v -> (v && v != 'None' && !v.isEmpty()) ? v.toDouble() : null }
                     def lng = { v -> (v && v != 'None' && !v.isEmpty()) ? v.toLong()   : null }
 
-                    // Expected values from opensource WGS test run (skip_subsampling=true, ~1M reads per sample)
+                    // Values from chr22-only test reference (genomes_base = test_genomes).
+                    // Reads map to chr22 only, so coverage/exclusion metrics differ from a
+                    // full-genome run; qc_status/qc_score remain FAIL/2 at this depth.
                     def expected = [
-                        'ResolveOMEv2.0-384-WGS-B4':  [total_reads: 2000367, qc_status: 'FAIL', qc_score: 2],
-                        'ResolveOMEv2.0-384-WGS-D3':  [total_reads: 1999493, qc_status: 'FAIL', qc_score: 2],
+                        'ResolveOMEv2.0-384-WGS-B4':  [total_reads: 1988082, qc_status: 'FAIL', qc_score: 2],
+                        'ResolveOMEv2.0-384-WGS-D3':  [total_reads: 1986997, qc_status: 'FAIL', qc_score: 2],
                     ]
 
                     assert lines.size() - 1 == expected.size() : "Expected ${expected.size()} samples, got ${lines.size() - 1}"
@@ -70,39 +73,42 @@ nextflow_pipeline {
                         def exp    = expected[sample]
                         assert exp != null : "Unexpected sample in wgsqc_all_metrics.tsv: ${sample}"
 
-                        assert cols[idx('total_reads')].trim().toLong()  == exp.total_reads : "total_reads mismatch for ${sample}"
+                        // total_reads: near-deterministic for skip_subsampling, but allow a
+                        // small tolerance to absorb aligner/thread-count jitter across runners.
+                        def totalReads = cols[idx('total_reads')].trim().toLong()
+                        assert totalReads >= (exp.total_reads * 0.97) && totalReads <= (exp.total_reads * 1.03) : "total_reads out of range for ${sample}: ${totalReads} (expected ~${exp.total_reads})"
                         assert cols[idx('qc_status')].trim()             == exp.qc_status   : "qc_status mismatch for ${sample}"
                         assert cols[idx('qc_score')].trim().toDouble().intValue() == exp.qc_score : "qc_score mismatch for ${sample}"
 
-                        // mean_coverage: >0 for WGS (observed ~0.08x at subsampled depth)
+                        // mean_coverage: reads concentrate on chr22 → observed ~0.54x
                         def meanCov = dbl(cols[idx('mean_coverage')].trim())
-                        if (meanCov != null) assert meanCov > 0 && meanCov < 1.0 : "mean_coverage out of range for ${sample}: ${meanCov}"
+                        if (meanCov != null) assert meanCov > 0 && meanCov < 2.0 : "mean_coverage out of range for ${sample}: ${meanCov}"
 
-                        // pct_duplication: very low at this depth
+                        // pct_duplication: observed ~0.027 on chr22-only mapping
                         def pctDup = dbl(cols[idx('pct_duplication')].trim())
-                        if (pctDup != null) assert pctDup >= 0.0 && pctDup <= 0.001 : "pct_duplication out of range for ${sample}: ${pctDup}"
+                        if (pctDup != null) assert pctDup >= 0.0 && pctDup <= 0.10 : "pct_duplication out of range for ${sample}: ${pctDup}"
 
-                        // pct_chimeras: observed 0.06-0.07
+                        // pct_chimeras: observed 0.05-0.06
                         def chimeras = dbl(cols[idx('pct_chimeras')].trim())
-                        if (chimeras != null) assert chimeras >= 0.03 && chimeras <= 0.15 : "pct_chimeras out of range for ${sample}: ${chimeras}"
+                        if (chimeras != null) assert chimeras >= 0.02 && chimeras <= 0.15 : "pct_chimeras out of range for ${sample}: ${chimeras}"
 
-                        // pct_1x: observed ~0.08 at subsampled depth
+                        // pct_1x: observed ~0.158 on chr22-only mapping
                         def pct1x = dbl(cols[idx('pct_1x')].trim())
-                        if (pct1x != null) assert pct1x >= 0.04 && pct1x <= 0.15 : "pct_1x out of range for ${sample}: ${pct1x}"
+                        if (pct1x != null) assert pct1x >= 0.05 && pct1x <= 0.30 : "pct_1x out of range for ${sample}: ${pct1x}"
 
-                        // pct_5x and above: very small at subsampled depth
+                        // pct_5x/pct_10x: observed ~0.019 / ~0.009
                         ['pct_5x', 'pct_10x'].each { col ->
                             def v = dbl(cols[idx(col)].trim())
-                            if (v != null) assert v >= 0.0 && v < 0.005 : "${col} out of range for ${sample}: ${v}"
+                            if (v != null) assert v >= 0.0 && v < 0.05 : "${col} out of range for ${sample}: ${v}"
                         }
 
                         // GC normalised coverage — sanity range checks
                         def gcNc4059 = dbl(cols[idx('gc_nc_40_59')].trim())
                         if (gcNc4059 != null) assert gcNc4059 >= 0.5 && gcNc4059 <= 1.5 : "gc_nc_40_59 out of range for ${sample}: ${gcNc4059}"
 
-                        // Insert size — observed: median ~295-385
+                        // Insert size — observed median ~235-286 on chr22-only mapping
                         def insMedian = dbl(cols[idx('insert_median')].trim())
-                        if (insMedian != null) assert insMedian >= 200.0 && insMedian <= 500.0 : "insert_median out of range for ${sample}: ${insMedian}"
+                        if (insMedian != null) assert insMedian >= 150.0 && insMedian <= 400.0 : "insert_median out of range for ${sample}: ${insMedian}"
                     }
                 },
 

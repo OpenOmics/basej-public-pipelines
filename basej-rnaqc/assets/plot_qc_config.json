@@ -1,0 +1,7 @@
+{
+  "cutoff_genes_detected": 1000,
+  "cutoff_mt_percent": 20,
+  "cutoff_aligned_reads": 500000,
+  "cutoff_duplication": 50,
+  "cutoff_q30_rate": 0.8
+}

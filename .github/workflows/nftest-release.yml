@@ -1,0 +1,301 @@
+name: nf-test validation on release
+
+on:
+  push:
+    branches: [release]
+
+env:
+  JAVA_VER: "17"
+  # Pin Nextflow to the version the public pipelines were transformed and validated
+  # against. The publish transform injects helper closures (e.g. resolveParam,
+  # findPileupTree) whose scoping is accepted by 25.10.2 but rejected by the stricter
+  # 26.x parser ("... is not defined"), so the transformed code only compiles on 25.x.
+  # Revisit once the transform is updated for 26.x. Nextflow self-selects via NXF_VER.
+  NXF_VER: "25.10.2"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      pipelines: ${{ steps.changes.outputs.pipelines }}
+      has_changes: ${{ steps.changes.outputs.has_changes }}
+      manual_pipelines: ${{ steps.changes.outputs.manual_pipelines }}
+      has_any_changes: ${{ steps.changes.outputs.has_any_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: changes
+        run: |
+          changed=$(git diff --name-only HEAD~1 HEAD | grep -oP '^[^/]+' | sort -u)
+
+          # CI pipelines. All use chr22-only test references (small indices, ~4-6 min
+          # runtimes) so standard ubuntu-latest runners suffice.
+          #  - basej-google-deepvariant: runs CPU-only in CI via the pipeline's
+          #    `test_cpu` profile (set in its nf-test.config) — CALL_VARIANTS uses the
+          #    plain google/deepvariant image with no --gpus, so no GPU is needed.
+          # MANUAL pipelines are EXCLUDED from automated nf-test (validated by hand):
+          #  - basej-rnaqc: needs the full RNA transcriptome reference (chr22-only makes
+          #    gene detection too sparse for its PCA/heatmap).
+          ci_dirs="basej-dnaqc basej-wgs basej-somatic basej-lineage basej-google-deepvariant"
+          manual_dirs="basej-rnaqc"
+
+          declare -a entries
+          for dir in $ci_dirs; do
+            if echo "$changed" | grep -qw "$dir"; then
+              entries+=("\"$dir\"")
+            fi
+          done
+
+          declare -a manual_entries
+          for dir in $manual_dirs; do
+            if echo "$changed" | grep -qw "$dir"; then
+              manual_entries+=("\"$dir\"")
+            fi
+          done
+
+          if [ ${#entries[@]} -gt 0 ]; then
+            list=$(printf '%s,' "${entries[@]}" | sed 's/,$//')
+            echo "pipelines=[$list]" >> "$GITHUB_OUTPUT"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pipelines=[]" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ ${#manual_entries[@]} -gt 0 ]; then
+            mlist=$(printf '%s,' "${manual_entries[@]}" | sed 's/,$//')
+            echo "manual_pipelines=[$mlist]" >> "$GITHUB_OUTPUT"
+          else
+            echo "manual_pipelines=[]" >> "$GITHUB_OUTPUT"
+          fi
+
+          # True if ANY pipeline (CI or manual) changed — gates PR creation so that
+          # manual-only pipeline releases still get a release->main PR opened.
+          if [ ${#entries[@]} -gt 0 ] || [ ${#manual_entries[@]} -gt 0 ]; then
+            echo "has_any_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_any_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  nftest:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pipeline: ${{ fromJson(needs.detect-changes.outputs.pipelines) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # Reclaim ~30GB so the locally-built container images fit on the runner.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker system prune -af || true
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VER }}
+
+      - name: Install Nextflow
+        run: |
+          curl -fsSL get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+
+      - name: Install nf-test
+        run: |
+          curl -fsSL https://code.askimed.com/install/nf-test | bash
+          sudo mv nf-test /usr/local/bin/
+
+      - name: Build local container images
+        # Most public pipelines use locally-built basejumper_* images (not in any
+        # registry). Building them here is itself part of the test: it verifies a
+        # user can build the images from container/ and run the pipeline.
+        # build_all_x86.sh logs each build and records OK/FAILED in SUMMARY.log
+        # without failing the shell, so we grep the summary and fail on any FAILED.
+        #
+        # Some pipelines (e.g. basej-google-deepvariant) ship no container/ build
+        # script — they pull public images (google/deepvariant, quay biocontainers)
+        # at task time — so we skip the build step for them.
+        run: |
+          build_script="${{ matrix.pipeline }}/container/build_all_x86.sh"
+          if [ ! -f "$build_script" ]; then
+            echo "No container build script for ${{ matrix.pipeline }} — uses public images, skipping build."
+            exit 0
+          fi
+          bash "$build_script"
+          summary="${{ matrix.pipeline }}/container/_build_logs/SUMMARY.log"
+          echo "===== container build summary ====="; cat "$summary"
+          if grep -q "FAILED" "$summary"; then
+            echo "::error::One or more container images failed to build for ${{ matrix.pipeline }}"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (Wasabi-backed test data)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.TEST_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TEST_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials << EOF
+          [default]
+          aws_access_key_id=$AWS_ACCESS_KEY_ID
+          aws_secret_access_key=$AWS_SECRET_ACCESS_KEY
+          EOF
+          echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
+
+      - name: Configure Nextflow for the runner (Wasabi endpoint, bwa-mem2 build, container uid)
+        # A global ~/.nextflow/config keeps the pipeline configs untouched. It sets:
+        # 1. aws.client.endpoint — the test data lives on the Wasabi-backed
+        #    bioskryb-public-data bucket and the provided keys are Wasabi keys, so
+        #    Nextflow must target the Wasabi S3 endpoint (else InvalidAccessKeyId).
+        # 2. env.BWAMEM2_BIN — force the AVX2 bwa-mem2 build. The default `bwa-mem2`
+        #    dispatcher inspects /proc/cpuinfo and can pick the AVX-512 build, but
+        #    GitHub's Azure runners have heterogeneous CPUs and some cannot execute
+        #    those instructions (illegal instruction -> no output -> empty channels).
+        #    Pipeline scripts use the BWAMEM2_BIN override, so production (unset) keeps
+        #    the auto-dispatcher.
+        # 3. docker.runOptions -u <uid>:<gid> — run every task container as the runner
+        #    user that owns the work dir. Some basejumper_* images run as a non-root
+        #    "appuser" whose UID differs from the runner's, so without this they cannot
+        #    write .command.trace ("touch: cannot touch '.command.trace': Permission
+        #    denied") -> the task fails -> Ginkgo empties -> PublishOp crash.
+        #
+        # Resource caps are handled by the pipelines themselves: conf/environment.config
+        # sets process.resourceLimits = [cpus: params.max_cpus, memory: params.max_memory],
+        # and the nf-test files request max_cpus=4 / max_memory=12.GB so every process
+        # fits a standard ubuntu-latest runner (4 CPU / 16 GB).
+        run: |
+          mkdir -p ~/.nextflow
+          cat > ~/.nextflow/config << 'EOF'
+          aws {
+            region = 'us-east-1'
+            client {
+              endpoint = 'https://s3.us-east-1.wasabisys.com'
+              s3PathStyleAccess = true
+            }
+          }
+          env {
+            BWAMEM2_BIN = 'bwa-mem2.avx2'
+          }
+          EOF
+          # Append docker.runOptions with the runner's real uid:gid (unquoted heredoc
+          # so $(id -u)/$(id -g) expand to numbers written literally into the config).
+          cat >> ~/.nextflow/config << EOF
+          docker {
+              runOptions = '-u $(id -u):$(id -g)'
+          }
+          EOF
+          echo "===== effective ~/.nextflow/config ====="; cat ~/.nextflow/config
+
+      - name: Run nf-test
+        working-directory: ${{ matrix.pipeline }}
+        run: nf-test test tests/main.nf.test --tag GRCh38
+
+      - name: Dump nf-test Nextflow logs on failure
+        # nf-test writes the run's nextflow.log under .nf-test/tests/<hash>/meta/.
+        # On failure the console only shows "Cannot access first() ..." and points
+        # at that log, which lives on the runner. Print the log plus the stderr of
+        # every failed task so the real root cause is visible in the job output.
+        if: failure()
+        working-directory: ${{ matrix.pipeline }}
+        run: |
+          # Print failed-task stderr FIRST (this is usually the real root cause),
+          # then only a tail of the large nextflow.log so it doesn't bury the errors.
+          echo "############ failed task .command.* dumps ############"
+          # A task failed if its .exitcode is missing or non-zero.
+          find .nf-test -type f -name ".exitcode" | while read -r ec; do
+            code=$(cat "$ec" 2>/dev/null || echo "NA")
+            if [ "$code" != "0" ]; then
+              d=$(dirname "$ec")
+              echo "########## FAILED task (exit=$code): $d ##########"
+              for f in .command.sh .command.err .command.out .command.log; do
+                if [ -s "$d/$f" ]; then echo "----- $f -----"; cat "$d/$f"; fi
+              done
+            fi
+          done
+          echo "=============== nextflow.log (tail) =================="
+          find .nf-test -type f -path "*/meta/nextflow.log" | while read -r log; do
+            echo "########## $log (last 120 lines) ##########"
+            tail -n 120 "$log"
+          done
+
+  create-pr:
+    needs: [detect-changes, nftest]
+    if: always() && needs.detect-changes.outputs.has_any_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release
+
+      - name: Create or update PR with validation summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIPELINES: ${{ needs.detect-changes.outputs.pipelines }}
+          MANUAL_PIPELINES: ${{ needs.detect-changes.outputs.manual_pipelines }}
+          NFTEST_RESULT: ${{ needs.nftest.result }}
+        run: |
+          pipelines=$(echo "$PIPELINES" | jq -r '.[]')
+          manual_pipelines=$(echo "$MANUAL_PIPELINES" | jq -r '.[]')
+
+          # Map the nftest job result to an icon/label. When no CI pipeline changed
+          # the nftest job is skipped, which is expected for manual-only releases.
+          if [ "$NFTEST_RESULT" == "success" ]; then
+            icon="✅"; status_text="PASSED"
+          elif [ "$NFTEST_RESULT" == "failure" ]; then
+            icon="❌"; status_text="FAILED"
+          elif [ "$NFTEST_RESULT" == "skipped" ]; then
+            icon="➖"; status_text="no automated nf-test ran"
+          else
+            icon="⚠️"; status_text="$NFTEST_RESULT"
+          fi
+
+          body="## nf-test Validation Summary\n\n"
+          body+="**Overall result:** ${icon} ${status_text}\n\n"
+
+          if [ -n "$pipelines" ]; then
+            body+="### Automatically validated (nf-test)\n\n"
+            body+="| Pipeline | Result |\n"
+            body+="|----------|--------|\n"
+            for p in $pipelines; do
+              body+="| ${p} | ${icon} |\n"
+            done
+            body+="\n"
+          fi
+
+          if [ -n "$manual_pipelines" ]; then
+            body+="### Manual validation required (excluded from CI)\n\n"
+            body+="These pipelines have no automated nf-test and must be validated by hand before merge:\n\n"
+            body+="| Pipeline | Result |\n"
+            body+="|----------|--------|\n"
+            for p in $manual_pipelines; do
+              body+="| ${p} | 🔎 manual |\n"
+            done
+            body+="\n"
+          fi
+
+          body+="\n---\n"
+          body+="*Triggered by push to \`release\` branch at $(date -u '+%Y-%m-%d %H:%M UTC')*"
+
+          existing=$(gh pr list --head release --base main --state open --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body "$(printf "$body")"
+            echo "Updated existing PR #$existing"
+          else
+            gh pr create \
+              --title "Release: merge validated pipelines to main" \
+              --body "$(printf "$body")" \
+              --base main \
+              --head release
+            echo "Created new PR"
+          fi
