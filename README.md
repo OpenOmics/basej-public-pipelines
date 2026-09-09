@@ -40,67 +40,75 @@ pipelines, email [basejumper@bioskryb.com](mailto:basejumper@bioskryb.com).
 
 The Basejumper pipeline suite is hosted under OpenOmics on the Biowulf cluster and can be utilized by loading the module as shown below.
 
-There are 5 individual pipelines available:
-- dnaqc, wgs, deepvariant, somatic, and lineage
+There are 6 individual pipelines available:
+- dnaqc, rnaqc, wgs, deepvariant, somatic, and lineage
 
-There is 1 pipeline chain available as an automated option for running the high-pass workflow:
+There is 1 pipeline chain available as an automated option for running a high-pass workflow:
 - wgs -> deepvariant -> somatic -> lineage
 
 ```
-# 1. Load the Basejumper module
+# Load the Basejumper module
 module load openomics/basejumper
 
 # Basejumper Pipeline Suite
 
-usage: basej-run [-h] --pipeline {dnaqc,wgs,deepvariant,somatic,lineage,wgs2lineage} [--input_csv INPUT_CSV] [--lineage_csv LINEAGE_CSV] [--outputDir OUTPUTDIR] 
-    [--workdir WORKDIR] [--dry-run] [--force] [--wgs_extra WGS_EXTRA] [--deepvariant_extra DEEPVARIANT_EXTRA] [--somatic_extra SOMATIC_EXTRA] [--lineage_extra LINEAGE_EXTRA]
+Usage: basej-run [--help] \
+          --pipeline {dnaqc,rnaqc,wgs,deepvariant,somatic,lineage,wgs2lineage} \
+          --input_csv INPUT_CSV [--lineage_csv LINEAGE_CSV] \
+          --outputDir OUTPUTDIR \
+          [--workDir WORKDIR] [--dry-run] [--force] \
+          [--wgs_extra WGS_EXTRA] [--deepvariant_extra DEEPVARIANT_EXTRA] \
+          [--somatic_extra SOMATIC_EXTRA] [--lineage_extra LINEAGE_EXTRA]
 
-Run any individual or the wgs2lineage BaseJumper pipeline
+Description:
+  Run any individual or the wgs2lineage BioSkryb BaseJumper pipeline.
 
 Required arguments:
-  --pipeline {dnaqc,wgs,deepvariant,somatic,lineage,wgs2lineage}
-                        Select which pipeline to run. 'wgs2lineage' is a convenience alias for the full chain: wgs -> deepvariant -> somatic -> lineage.
+  --pipeline {dnaqc,rnaqc,wgs,deepvariant,somatic,lineage,wgs2lineage}
+                                  Select which pipeline to run. 'wgs2lineage' is a convenience alias 
+                                  for the chain: wgs -> deepvariant -> somatic -> lineage.
+                                
   --input_csv INPUT_CSV
-                        Input CSV. Required for --pipeline dnaqc / wgs / deepvariant / somatic / wgs2lineage. For --pipeline
-                        wgs2lineage, this must be the wgs input samplesheet (biosampleName,read1,read2,group); basej-run auto-builds deepvariant's and somatic's samplesheets using pipeline-provided index files.
+                                  Input CSV. Required for --pipeline dnaqc / rnaqc / wgs / deepvariant / somatic / wgs2lineage.
+                                  For wgs2lineage, this must be the wgs input samplesheet (biosampleName,read1,read2,group);
+                                  basej-run auto-builds the samplesheets for deepvariant and somatic using pipeline-provided index files.
+
   --lineage_csv LINEAGE_CSV
-                        Input CSV for --pipeline lineage specifically. Output from basej-somatic.
+                                  Input CSV for --pipeline lineage specifically. Output from basej-somatic.
   --outputDir OUTPUTDIR
-                        Base output directory (default: ./basej-results).
+                                  Base output directory (default: ./basej-results).
 
-Additional arguments:
-  --workdir WORKDIR     Nextflow work directory (default: ./work).
-  --dry-run             Print the nextflow run commands.
-  --force               Rerun a step even if already marked complete.
-  -h, --help            Show this help message and exit
+Optional arguments:
+  --workdir WORKDIR               Nextflow work directory (default: ./work).
+  --dry-run                       Print the nextflow run commands.
+  --force                         Rerun a step even if already marked complete.
+  -h, --help                      Show this help message and exit.
 
+Optional parameter overrides for --pipeline wgs2lineage (quoted as one string):
+  --wgs_extra WGS_EXTRA                     Additional basej-wgs parameter flags
 
-Optional parameter overrides for --pipeline wgs2lineage:
-  --wgs_extra WGS_EXTRA
-                        Additional basej-wgs parameter flags, quoted as one string
-  --deepvariant_extra DEEPVARIANT_EXTRA
-                        Additional basej-deepvariant parameter flags, quoted as one string
-  --somatic_extra SOMATIC_EXTRA
-                        Additional basej-somatic parameter flags, quoted as one string
-  --lineage_extra LINEAGE_EXTRA
-                        Additional basej-lineage parameter flags, quoted as one string
+  --deepvariant_extra DEEPVARIANT_EXTRA     Additional basej-deepvariant parameter flags
+
+  --somatic_extra SOMATIC_EXTRA             Additional basej-somatic parameter flags
+
+  --lineage_extra LINEAGE_EXTRA             Additional basej-lineage parameter flags
 
 ```
 
 ### Example Run Commands
 ```
-  # Run a standalone pipeline (dnaqc, wgs, deepvariant, somatic)
+  # Run a standalone pipeline (dnaqc, rnaqc, wgs, deepvariant, somatic)
   basej-run --pipeline dnaqc --input_csv dnaqc_input.csv --outputDir results [options]
 
   # Run the lineage pipeline using somatic's output samplesheet
   basej-run --pipeline lineage --lineage_csv results/somatic/index/lineage_inputs.csv --outputDir results [options]
 
-  # Run the full chain wgs2lineage (wgs -> deepvariant -> somatic -> lineage)
+  # Run the chain wgs2lineage (wgs -> deepvariant -> somatic -> lineage)
   basej-run --pipeline wgs2lineage --input_csv wgs_input.csv --outputDir results
 
   # Run the full chain wgs2lineage with a pipeline-specific parameter overridden
   basej-run --pipeline wgs2lineage --input_csv wgs_input.csv --outputDir results \
-    --wgs_extra "--mode exome" --somatic_extra "--gender female"
+    --somatic_extra "--gender female"
 ```
 
 ## Need help?
