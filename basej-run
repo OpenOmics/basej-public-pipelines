@@ -3,7 +3,7 @@
 """
 basej-run — main entry point for the BaseJumper pipeline suite.
 
-    basej-run --pipeline <dnaqc|wgs|deepvariant|somatic|lineage|wgs2lineage> \
+    basej-run --pipeline <dnaqc|rnaqc|wgs|deepvariant|somatic|lineage|wgs2lineage> \
               --input_csv <csv> OR --lineage_csv (lineage) \
               --outputDir <dir> [options]
 
@@ -284,6 +284,10 @@ class Paths:
     @property
     def dnaqc_dir(self) -> Path:
         return self.basej_home / "basej-dnaqc"
+        
+    @property
+    def rnaqc_dir(self) -> Path:
+        return self.basej_home / "basej-rnaqc"
 
     @property
     def wgs_dir(self) -> Path:
@@ -304,6 +308,7 @@ class Paths:
     def pipeline_dir(self, pipeline: str) -> Path:
         return {
             "dnaqc": self.dnaqc_dir,
+            "rnaqc": self.rnaqc_dir,
             "wgs": self.wgs_dir,
             "deepvariant": self.deepvariant_dir,
             "somatic": self.somatic_dir,
@@ -541,7 +546,7 @@ class Orchestrator:
 
 EPILOG = """\
 EXAMPLES
-  # Run a standalone pipeline (dnaqc, wgs, deepvariant, somatic)
+  # Run a standalone pipeline (dnaqc, rnaqc, wgs, deepvariant, somatic)
   basej-run --pipeline dnaqc --input_csv dnaqc_input.csv --outputDir results [options]
 
   # Run the lineage pipeline using somatic's output samplesheet
@@ -555,17 +560,38 @@ EXAMPLES
     --wgs_extra "--mode exome" --somatic_extra "--gender female"
 """
 
+USAGE = """\
+basej-run [--help]
+           --pipeline {dnaqc,rnaqc,wgs,deepvariant,somatic,lineage,wgs2lineage}
+           --input_csv INPUT_CSV [--lineage_csv LINEAGE_CSV]
+           --outputDir OUTPUTDIR
+           [--workDir WORKDIR] [--dry-run] [--force]
+           [--wgs_extra WGS_EXTRA] [--deepvariant_extra DEEPVARIANT_EXTRA]
+           [--somatic_extra SOMATIC_EXTRA] [--lineage_extra LINEAGE_EXTRA]
+
+Description:
+    Run any individual or the wgs2lineage BioSkryb BaseJumper pipeline.
+"""
+
+class SpacedHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog):
+        super().__init__(prog, max_help_position=40, width=110)
+    
+    def _format_action(self, action):
+        return super()._format_action(action) + "\n"
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="basej-run",
-        description="Run any individual or the wgs2lineage BaseJumper pipeline",
+        usage=USAGE,
         epilog=EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=SpacedHelpFormatter,
+        add_help=False
     )
     parser.add_argument(
         "--pipeline", required=True,
-        choices=["dnaqc", "wgs", "deepvariant", "somatic", "lineage", "wgs2lineage"],
-        help=("Select which pipeline to run. 'wgs2lineage' is a convenience alias for the full chain: wgs -> deepvariant -> somatic -> lineage"),
+        choices=["dnaqc", "rnaqc", "wgs", "deepvariant", "somatic", "lineage", "wgs2lineage"],
+        help=("Select which pipeline to run. 'wgs2lineage' is a convenience alias for the chain: wgs -> deepvariant -> somatic -> lineage"),
     )
     parser.add_argument(
         "--input_csv", type=Path, default=None,
