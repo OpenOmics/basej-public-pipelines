@@ -4,6 +4,7 @@ suppressMessages(library(data.table))
 suppressMessages(library(foreach))
 suppressMessages(library(doParallel))
 suppressMessages(library(parallel))
+suppressMessages(library(parallelly))
 
 #Create function to create segments
 range_vectors <- function(x,y) {
@@ -481,7 +482,7 @@ chunk_size <- as.numeric(args[6])
 read_length <- as.numeric(args[7])
 
 ### Parallelization ###
-numCores <- detectCores()
+numCores <- max(1, parallelly::availableCores())
 cl <- makeCluster(numCores,type = "FORK")
 registerDoParallel(numCores) 
 

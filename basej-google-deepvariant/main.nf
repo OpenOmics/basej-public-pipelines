@@ -88,6 +88,7 @@ process DEEPVARIANT_MAKE_EXAMPLES_ONLY {
 //              tfrecords. GPU-accelerated container.
 // ============================================================================
 process DEEPVARIANT_CALL_VARIANTS {
+    label "gpu"
     tag "${sample_name}"
 
     input:

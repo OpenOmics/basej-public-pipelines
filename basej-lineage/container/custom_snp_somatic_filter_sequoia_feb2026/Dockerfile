@@ -117,6 +117,7 @@ RUN apt-get install bc
 
 RUN R -e  "install.packages('foreach', repos = 'http://cran.us.r-project.org')"
 RUN R -e  "install.packages('doParallel', repos = 'http://cran.us.r-project.org')"
+RUN R -e  "install.packages('parallelly', repos = 'http://cran.us.r-project.org')"
 
 RUN R -e  "install.packages('pals', repos = 'http://cran.us.r-project.org')"
 RUN R -e  "install.packages('paletteer', repos = 'http://cran.us.r-project.org')"
